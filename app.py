@@ -37,9 +37,9 @@ if correct_password:
 
 # --- 1. AI出力データ構造の定義 ---
 class CorrectionItem(BaseModel):
-    page_section: str = Field(description="該当箇所（例: P1・表など）")
-    line_info: str = Field(description="行位置（例: 3行目）")
-    error_type: str = Field(description="エラー区分")
+    page_section: str = Field(description="該当箇所（例: P1・上段など）")
+    line_info: str = Field(description="原本の行位置（例: 3行目）")
+    error_type: str = Field(description="エラー区分（誤字、脱字、衍字、文字化け等）")
     status: str = Field(description="『確定（修正）』または『要確認（赤字）』")
     original_text: str = Field(description="元のテキスト")
     corrected_text: str = Field(description="修正後のテキスト")
@@ -47,14 +47,18 @@ class CorrectionItem(BaseModel):
 
 class TextSegment(BaseModel):
     text: str = Field(description="テキスト断片")
-    mode: str = Field(description="『normal』(変更なし)、『fixed』(確定修正)、『uncertain』(要確認・赤字)、『header』(見出し)")
+    mode: str = Field(description="『normal』(変更なし)、『fixed』(確定修正)、『uncertain』(要確認・赤字)")
 
 class LineData(BaseModel):
-    segments: list[TextSegment]
+    segments: list[TextSegment] = Field(description="原本PDFの1行に含まれるテキスト断片リスト")
+
+class PageData(BaseModel):
+    page_number: int = Field(description="原本PDFのページ番号")
+    lines: list[LineData] = Field(description="原本PDFの行ごとのデータ。原本画像で改行されている位置と全く同じ単位で1行ずつ格納する")
 
 class ProofreadResult(BaseModel):
     corrections: list[CorrectionItem]
-    formatted_lines: list[LineData]
+    pages: list[PageData]
 
 # --- 2. テキスト処理関数 ---
 def decode_text_file(raw_bytes: bytes) -> str:
@@ -112,7 +116,7 @@ def create_excel_bytes(corrections: list[CorrectionItem], doc_title: str) -> byt
 
     ws["A1"] = f"{doc_title} 自動校正一覧表"
     ws["A1"].font = tf
-    headers = ["No.", "頁・段", "行位置", "エラー区分", "ステータス", "修正前", "修正後（正・推定）", "備考・理由"]
+    headers = ["No.", "頁・段", "原本行位置", "エラー区分", "ステータス", "修正前", "修正後（正・推定）", "備考・理由"]
     for c, h in enumerate(headers, 1):
         cell = ws.cell(row=3, column=c, value=h)
         cell.font, cell.fill, cell.border = hf, hfill, border
@@ -144,44 +148,73 @@ def create_excel_bytes(corrections: list[CorrectionItem], doc_title: str) -> byt
     wb.save(out)
     return out.getvalue()
 
-def create_word_bytes(lines_data: list[LineData], doc_title: str) -> bytes:
+def create_word_bytes(pages_data: list[PageData], doc_title: str) -> bytes:
     doc = docx.Document()
+    
+    # 標準フォント設定
     style = doc.styles['Normal']
     style.font.name = 'MS Mincho'
     style.font.size = Pt(11)
     style._element.rPr.rFonts.set(qn('w:eastAsia'), 'ＭＳ 明朝')
+    
+    # 表題
     tp = doc.add_paragraph()
     tp.alignment = WD_ALIGN_PARAGRAPH.CENTER
     tr = tp.add_run(f"{doc_title} 校正済テキスト")
     tr.bold, tr.font.size = True, Pt(15)
+    
+    # 凡例
     lp = doc.add_paragraph()
-    lp.add_run("【凡例】\n").bold = True
-    lp.add_run("・紺色太字（下線付）：確定修正\n")
-    rr = lp.add_run("・赤字太字：要確認箇所\n")
+    lp.paragraph_format.space_after = Pt(6)
+    lp.add_run("【凡例】 ").bold = True
+    f_run = lp.add_run("紺色太字（下線付）：確定修正")
+    f_run.bold, f_run.underline, f_run.font.color.rgb = True, True, RGBColor(0x00, 0x33, 0x66)
+    lp.add_run(" ／ ")
+    rr = lp.add_run("赤字太字：要確認箇所（虫損・異体字疑義等）")
     rr.bold, rr.font.color.rgb = True, RGBColor(0xC0, 0x00, 0x00)
-    doc.add_paragraph("─" * 40)
-    for line in lines_data:
-        p = doc.add_paragraph()
-        p.paragraph_format.space_after = Pt(2)
-        p.paragraph_format.line_spacing = 1.35
-        for seg in line.segments:
-            r = p.add_run(seg.text)
-            r.font.name = 'MS Mincho'
-            r._element.rPr.rFonts.set(qn('w:eastAsia'), 'ＭＳ 明朝')
-            r.font.size = Pt(11)
-            if seg.mode == 'fixed':
-                r.bold, r.underline, r.font.color.rgb = True, True, RGBColor(0x00, 0x33, 0x66)
-            elif seg.mode == 'uncertain':
-                r.bold, r.font.color.rgb = True, RGBColor(0xC0, 0x00, 0x00)
-            elif seg.mode == 'header':
-                r.bold, r.font.size, r.font.color.rgb = True, Pt(12), RGBColor(0x1F, 0x4E, 0x78)
+    
+    doc.add_paragraph("━" * 45)
+
+    for page in pages_data:
+        # 頁番号の見出し（原本との照合用）
+        hp = doc.add_paragraph()
+        hp.paragraph_format.space_before = Pt(14)
+        hp.paragraph_format.space_after = Pt(4)
+        hr = hp.add_run(f"【 第 {page.page_number} 頁 】")
+        hr.bold = True
+        hr.font.size = Pt(12)
+        hr.font.color.rgb = RGBColor(0x1F, 0x4E, 0x78)  # 落ち着いた紺色
+        
+        # 原本の各行を1段落（改行）として忠実に書き出し
+        for line in page.lines:
+            p = doc.add_paragraph()
+            p.paragraph_format.space_before = Pt(0)
+            p.paragraph_format.space_after = Pt(1)  # 行間を詰めて原本の並びを維持
+            p.paragraph_format.line_spacing = 1.25
+            for seg in line.segments:
+                r = p.add_run(seg.text)
+                r.font.name = 'MS Mincho'
+                r._element.rPr.rFonts.set(qn('w:eastAsia'), 'ＭＳ 明朝')
+                r.font.size = Pt(11)
+                if seg.mode == 'fixed':
+                    r.bold, r.underline, r.font.color.rgb = True, True, RGBColor(0x00, 0x33, 0x66)
+                elif seg.mode == 'uncertain':
+                    r.bold, r.font.color.rgb = True, RGBColor(0xC0, 0x00, 0x00)
+
+        # ページ末尾の境界線
+        sep_p = doc.add_paragraph()
+        sep_p.paragraph_format.space_before = Pt(6)
+        sep_p.paragraph_format.space_after = Pt(10)
+        sep_r = sep_p.add_run("―" * 40)
+        sep_r.font.color.rgb = RGBColor(0xBD, 0xBD, 0xBD)
+
     out = io.BytesIO()
     doc.save(out)
     return out.getvalue()
 
 # --- 4. Streamlit UI (本体) ---
 st.title("📝 PDF原本×テキスト 自動校正")
-st.caption("300ページ自動分割リレー対応。PC・スマホから操作可。")
+st.caption("原本改行完全一致・頁数自動挿入対応。PC・スマホから操作可。")
 
 default_key = st.secrets.get("GEMINI_API_KEY", "") if hasattr(st, "secrets") else ""
 api_key = st.sidebar.text_input("Gemini APIキー", value=default_key, type="password")
@@ -194,7 +227,7 @@ model_name = "gemini-3.8-flash" if "Flash" in model_choice else "gemini-3.8-pro"
 batch_size = st.sidebar.slider("1回あたりの処理ページ数", 1, 5, 3)
 
 if "all_corrections" not in st.session_state: st.session_state.all_corrections = []
-if "all_lines" not in st.session_state: st.session_state.all_lines = []
+if "all_pages" not in st.session_state: st.session_state.all_pages = []
 if "last_done_page" not in st.session_state: st.session_state.last_done_page = 0
 
 pdf_file = st.file_uploader("① 原本PDF", type=["pdf"])
@@ -217,7 +250,7 @@ if pdf_file and txt_file:
     with cb2: 
         if st.button("🗑️ リセット", use_container_width=True):
             st.session_state.all_corrections = []
-            st.session_state.all_lines = []
+            st.session_state.all_pages = []
             st.session_state.last_done_page = 0
             st.rerun()
 
@@ -227,7 +260,7 @@ if pdf_file and txt_file:
         else:
             client = genai.Client(api_key=api_key)
             st.session_state.all_corrections = []
-            st.session_state.all_lines = []
+            st.session_state.all_pages = []
             tot_target = end_p - start_p + 1
             p_bar = st.progress(0, "処理開始...")
             s_box = st.empty()
@@ -239,9 +272,19 @@ if pdf_file and txt_file:
                 chunk = extract_text_for_batch(raw_text, b_start, b_end, total_pages)
                 
                 prompt = f"""
-あなたは古典籍・仏教文献の専門校正AIです。画像({b_start}〜{b_end}頁)と以下のテキストを照合し校正してください。
-1. 明らかな誤字脱字・衍字・文字化け(?など)は statusを『確定（修正）』, modeを『fixed』。
-2. 虫損・割注脱落など要確認箇所は statusを『要確認（赤字）』, modeを『uncertain』とし理由を記載。
+あなたは古典籍・仏教文献の専門校正AIです。原本PDF画像({b_start}〜{b_end}頁)と以下のテキストデータを照合・校正してください。
+
+【重要指示】
+1. **原本PDFの改行位置の完全一致**:
+   - 原本画像で改行されている位置をそのまま維持し、原本の1行を `LineData` の1要素として出力してください。
+   - 原本PDFとWordを並べて校正するため、勝手に改行を繋げたり、行の途中で不自然に分割しないでください。
+2. **ページ区切り**:
+   - 各ページごとに `page_number` を付与し、そのページの行を順番通り漏れなく出力してください。
+3. **校正とマーキング**:
+   - 明らかな誤字脱字・衍字・文字化け(?など)の修正箇所は statusを『確定（修正）』, modeを『fixed』。
+   - 虫損・かすれ・割注脱落など要確認箇所は statusを『要確認（赤字）』, modeを『uncertain』とし、Excel用の理由を記載。
+   - 修正のない正常なテキストは modeを『normal』。
+
 【対象テキスト】\n{chunk}
 """
                 for att in range(3):
@@ -252,7 +295,7 @@ if pdf_file and txt_file:
                         )
                         obj = ProofreadResult.model_validate_json(res.text)
                         st.session_state.all_corrections.extend(obj.corrections)
-                        st.session_state.all_lines.extend(obj.formatted_lines)
+                        st.session_state.all_pages.extend(obj.pages)
                         st.session_state.last_done_page = b_end
                         break
                     except Exception as e:
@@ -263,10 +306,10 @@ if pdf_file and txt_file:
                 p_bar.progress(min(1.0, done / tot_target), f"進行状況: {done} / {tot_target} ページ完了")
             s_box.success(f"✅ {start_p}〜{st.session_state.last_done_page} ページの校正が完了！（検出: {len(st.session_state.all_corrections)} 件）")
 
-    if st.session_state.all_corrections or st.session_state.all_lines:
+    if st.session_state.all_corrections or st.session_state.all_pages:
         st.divider()
         st.subheader(f"📥 ダウンロード（〜P{st.session_state.last_done_page}反映済）")
         ex_data = create_excel_bytes(st.session_state.all_corrections, base_name)
-        wd_data = create_word_bytes(st.session_state.all_lines, base_name)
+        wd_data = create_word_bytes(st.session_state.all_pages, base_name)
         st.download_button("📊 校正一覧Excelをダウンロード", ex_data, f"{base_name}_校正一覧_P{start_p}-P{st.session_state.last_done_page}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
         st.download_button("📄 校正済Wordをダウンロード", wd_data, f"{base_name}_校正済_P{start_p}-P{st.session_state.last_done_page}.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", use_container_width=True)
