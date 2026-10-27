@@ -39,7 +39,7 @@ if correct_password:
 class CorrectionItem(BaseModel):
     page_section: str = Field(description="該当箇所（例: P1・上段など）")
     line_info: str = Field(description="原本の行位置（例: 3行目）")
-    error_type: str = Field(description="エラー区分（誤字、脱字、衍字、文字化け等）")
+    error_type: str = Field(description="エラー区分（誤字、脱字、衍字、文字化け、旧字新字等）")
     status: str = Field(description="『確定（修正）』または『要確認（赤字）』")
     original_text: str = Field(description="元のテキスト")
     corrected_text: str = Field(description="修正後のテキスト")
@@ -47,7 +47,7 @@ class CorrectionItem(BaseModel):
 
 class TextSegment(BaseModel):
     text: str = Field(description="テキスト断片")
-    mode: str = Field(description="『normal』(変更なし)、『fixed』(確定修正)、『uncertain』(要確認・赤字)")
+    mode: str = Field(description="『normal』(標準)、『fixed』(確定修正)、『uncertain』(要確認・赤字)")
 
 class LineData(BaseModel):
     segments: list[TextSegment] = Field(description="原本PDFの1行に含まれるテキスト断片リスト")
@@ -151,19 +151,16 @@ def create_excel_bytes(corrections: list[CorrectionItem], doc_title: str) -> byt
 def create_word_bytes(pages_data: list[PageData], doc_title: str) -> bytes:
     doc = docx.Document()
     
-    # 標準フォント設定
     style = doc.styles['Normal']
     style.font.name = 'MS Mincho'
     style.font.size = Pt(11)
     style._element.rPr.rFonts.set(qn('w:eastAsia'), 'ＭＳ 明朝')
     
-    # 表題
     tp = doc.add_paragraph()
     tp.alignment = WD_ALIGN_PARAGRAPH.CENTER
     tr = tp.add_run(f"{doc_title} 校正済テキスト")
     tr.bold, tr.font.size = True, Pt(15)
     
-    # 凡例
     lp = doc.add_paragraph()
     lp.paragraph_format.space_after = Pt(6)
     lp.add_run("【凡例】 ").bold = True
@@ -176,20 +173,18 @@ def create_word_bytes(pages_data: list[PageData], doc_title: str) -> bytes:
     doc.add_paragraph("━" * 45)
 
     for page in pages_data:
-        # 頁番号の見出し（原本との照合用）
         hp = doc.add_paragraph()
         hp.paragraph_format.space_before = Pt(14)
         hp.paragraph_format.space_after = Pt(4)
         hr = hp.add_run(f"【 第 {page.page_number} 頁 】")
         hr.bold = True
         hr.font.size = Pt(12)
-        hr.font.color.rgb = RGBColor(0x1F, 0x4E, 0x78)  # 落ち着いた紺色
+        hr.font.color.rgb = RGBColor(0x1F, 0x4E, 0x78)
         
-        # 原本の各行を1段落（改行）として忠実に書き出し
         for line in page.lines:
             p = doc.add_paragraph()
             p.paragraph_format.space_before = Pt(0)
-            p.paragraph_format.space_after = Pt(1)  # 行間を詰めて原本の並びを維持
+            p.paragraph_format.space_after = Pt(1)
             p.paragraph_format.line_spacing = 1.25
             for seg in line.segments:
                 r = p.add_run(seg.text)
@@ -201,7 +196,6 @@ def create_word_bytes(pages_data: list[PageData], doc_title: str) -> bytes:
                 elif seg.mode == 'uncertain':
                     r.bold, r.font.color.rgb = True, RGBColor(0xC0, 0x00, 0x00)
 
-        # ページ末尾の境界線
         sep_p = doc.add_paragraph()
         sep_p.paragraph_format.space_before = Pt(6)
         sep_p.paragraph_format.space_after = Pt(10)
@@ -214,7 +208,7 @@ def create_word_bytes(pages_data: list[PageData], doc_title: str) -> bytes:
 
 # --- 4. Streamlit UI (本体) ---
 st.title("📝 PDF原本×テキスト 自動校正")
-st.caption("原本改行完全一致・頁数自動挿入対応。PC・スマホから操作可。")
+st.caption("原本改行完全一致・旧字新字自動変換対応。PC・スマホから操作可。")
 
 default_key = st.secrets.get("GEMINI_API_KEY", "") if hasattr(st, "secrets") else ""
 api_key = st.sidebar.text_input("Gemini APIキー", value=default_key, type="password")
@@ -224,6 +218,10 @@ model_choice = st.sidebar.radio(
     index=0
 )
 model_name = "gemini-3.8-flash" if "Flash" in model_choice else "gemini-3.8-pro"
+
+# 旧漢字変換オプション
+convert_kanji = st.sidebar.checkbox("旧漢字を新漢字に変換する", value=True, help="佛→仏、經→経、體→体などの旧字体を現代の標準新字体に統一してWordに出力します。")
+
 batch_size = st.sidebar.slider("1回あたりの処理ページ数", 1, 5, 3)
 
 if "all_corrections" not in st.session_state: st.session_state.all_corrections = []
@@ -265,6 +263,15 @@ if pdf_file and txt_file:
             p_bar = st.progress(0, "処理開始...")
             s_box = st.empty()
 
+            kanji_instruction = """
+4. **旧字体の新字体化（旧漢字→新漢字）**:
+   - 原本画像やテキストにある旧漢字（例: 佛→仏、經→経、體→体、爲→為、應→応、觀→観、釋→釈、晝→昼、辨/瓣/辯→弁 等）は、すべて現代の新字体（常用漢字・標準字体）へ変換してWordのテキストに出力してください。
+   - 一般的な旧字新字変換はWord本文内で自然に適用し、Excel表にはOCR誤字・脱字や文脈上の疑義箇所を中心に記録してください。
+""" if convert_kanji else """
+4. **字体の維持**:
+   - 原本の字体を尊重し、旧字体を新字体へ意図的に統一・変換することは行わないでください。
+"""
+
             for b_start in range(start_p, end_p + 1, batch_size):
                 b_end = min(b_start + batch_size - 1, end_p)
                 s_box.info(f"🔄 {b_start}〜{b_end}ページ目を照合中... (対象: {start_p}〜{end_p})")
@@ -276,14 +283,14 @@ if pdf_file and txt_file:
 
 【重要指示】
 1. **原本PDFの改行位置の完全一致**:
-   - 原本画像で改行されている位置をそのまま維持し、原本の1行を `LineData` の1要素として出力してください。
-   - 原本PDFとWordを並べて校正するため、勝手に改行を繋げたり、行の途中で不自然に分割しないでください。
+   - 原本画像で改行されている位置をそのまま維持し、原本の1行を `LineData` の1要素として出力してください。勝手に改行を繋げないでください。
 2. **ページ区切り**:
    - 各ページごとに `page_number` を付与し、そのページの行を順番通り漏れなく出力してください。
 3. **校正とマーキング**:
    - 明らかな誤字脱字・衍字・文字化け(?など)の修正箇所は statusを『確定（修正）』, modeを『fixed』。
    - 虫損・かすれ・割注脱落など要確認箇所は statusを『要確認（赤字）』, modeを『uncertain』とし、Excel用の理由を記載。
    - 修正のない正常なテキストは modeを『normal』。
+{kanji_instruction}
 
 【対象テキスト】\n{chunk}
 """
