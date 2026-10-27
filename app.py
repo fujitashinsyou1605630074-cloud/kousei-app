@@ -15,6 +15,26 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
+st.set_page_config(page_title="古文書自動校正", page_icon="📝", layout="centered")
+
+# --- セキュリティ：パスワード認証 ---
+correct_password = st.secrets.get("APP_PASSWORD", "")
+
+if correct_password:
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+
+    if not st.session_state.authenticated:
+        st.title("🔒 パスワード認証")
+        pwd_input = st.text_input("アクセス用パスワードを入力してください", type="password")
+        if st.button("ログイン", type="primary"):
+            if pwd_input == correct_password:
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("パスワードが正しくありません。")
+        st.stop()
+
 # --- 1. AI出力データ構造の定義 ---
 class CorrectionItem(BaseModel):
     page_section: str = Field(description="該当箇所（例: P1・表など）")
@@ -159,8 +179,7 @@ def create_word_bytes(lines_data: list[LineData], doc_title: str) -> bytes:
     doc.save(out)
     return out.getvalue()
 
-# --- 4. Streamlit UI (料金節約モード搭載) ---
-st.set_page_config(page_title="古文書自動校正", page_icon="📝", layout="centered")
+# --- 4. Streamlit UI (本体) ---
 st.title("📝 PDF原本×テキスト 自動校正")
 st.caption("300ページ自動分割リレー対応。PC・スマホから操作可。")
 
@@ -171,7 +190,7 @@ model_choice = st.sidebar.radio(
     ["1頁あたり約1円 (Flash)", "1頁あたり約4円・高精度 (Pro)"],
     index=0
 )
-model_name = "gemini-2.5-flash" if "Flash" in model_choice else "gemini-2.5-pro"
+model_name = "gemini-3.8-flash" if "Flash" in model_choice else "gemini-3.8-pro"
 batch_size = st.sidebar.slider("1回あたりの処理ページ数", 1, 5, 3)
 
 if "all_corrections" not in st.session_state: st.session_state.all_corrections = []
