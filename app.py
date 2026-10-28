@@ -233,7 +233,8 @@ model_choice = st.sidebar.radio(
     ["1頁あたり約1円 (Flash)", "1頁あたり約4円・高精度 (Pro)"],
     index=0
 )
-model_name = "gemini-3.8-flash" if "Flash" in model_choice else "gemini-3.8-pro"
+# 正しい最新モデル名に更新
+model_name = "gemini-3.8-flash" if "Flash" in model_choice else "gemini-3.1-pro"
 convert_kanji = st.sidebar.checkbox("旧漢字を新漢字に変換する", value=True)
 batch_size = st.sidebar.slider("1回あたりの処理ページ数", 1, 5, 3)
 
