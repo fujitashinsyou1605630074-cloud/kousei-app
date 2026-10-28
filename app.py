@@ -230,11 +230,11 @@ default_key = st.secrets.get("GEMINI_API_KEY", "") if hasattr(st, "secrets") els
 api_key = st.sidebar.text_input("Gemini APIキー", value=default_key, type="password")
 model_choice = st.sidebar.radio(
     "AIモデル（料金と精度のバランス）", 
-    ["1頁あたり約1円 (Flash)", "1頁あたり約4円・高精度 (Pro)"],
+    ["1頁あたり約1円 (Flash)", "高精度フラッグシップ (Argon)"],
     index=0
 )
-# 正しい最新モデル名に更新
-model_name = "gemini-3.8-flash" if "Flash" in model_choice else "gemini-3.1-pro"
+# 正式な最新モデル名に設定
+model_name = "gemini-3.8-flash" if "Flash" in model_choice else "gemini-4-argon"
 convert_kanji = st.sidebar.checkbox("旧漢字を新漢字に変換する", value=True)
 batch_size = st.sidebar.slider("1回あたりの処理ページ数", 1, 5, 3)
 
