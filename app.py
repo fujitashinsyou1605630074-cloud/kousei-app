@@ -2,6 +2,7 @@ import streamlit as st
 import fitz  # PyMuPDF
 from PIL import Image
 import io
+import os
 import re
 import time
 import openpyxl
@@ -34,6 +35,10 @@ if correct_password:
             else:
                 st.error("パスワードが正しくありません。")
         st.stop()
+
+# --- バックアップファイル定義 ---
+BACKUP_EXCEL_PATH = "backup_last_result.xlsx"
+BACKUP_WORD_PATH = "backup_last_result.docx"
 
 # --- 1. AI出力データ構造の定義 ---
 class CorrectionItem(BaseModel):
@@ -150,7 +155,6 @@ def create_excel_bytes(corrections: list[CorrectionItem], doc_title: str) -> byt
 
 def create_word_bytes(pages_data: list[PageData], doc_title: str) -> bytes:
     doc = docx.Document()
-    
     style = doc.styles['Normal']
     style.font.name = 'MS Mincho'
     style.font.size = Pt(11)
@@ -208,7 +212,19 @@ def create_word_bytes(pages_data: list[PageData], doc_title: str) -> bytes:
 
 # --- 4. Streamlit UI (本体) ---
 st.title("📝 PDF原本×テキスト 自動校正")
-st.caption("原本改行完全一致・旧字新字自動変換対応。PC・スマホから操作可。")
+st.caption("原本改行完全一致・旧字新字変換・自動救済バックアップ対応。")
+
+# --- セッション切れ救済エリア ---
+if os.path.exists(BACKUP_EXCEL_PATH) and os.path.exists(BACKUP_WORD_PATH):
+    with st.expander("📦 【直前の校正バックアップ】前回のデータが残っています", expanded=True):
+        st.info("通信切断やタイムアウト後でも、直前に完了した成果物をここから再ダウンロードできます。")
+        c_b1, c_b2 = st.columns(2)
+        with c_b1:
+            with open(BACKUP_EXCEL_PATH, "rb") as f:
+                st.download_button("📊 直前の校正Excelを復元", f.read(), "直前バックアップ_校正一覧.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+        with c_b2:
+            with open(BACKUP_WORD_PATH, "rb") as f:
+                st.download_button("📄 直前の校正Wordを復元", f.read(), "直前バックアップ_校正済.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", use_container_width=True)
 
 default_key = st.secrets.get("GEMINI_API_KEY", "") if hasattr(st, "secrets") else ""
 api_key = st.sidebar.text_input("Gemini APIキー", value=default_key, type="password")
@@ -218,10 +234,7 @@ model_choice = st.sidebar.radio(
     index=0
 )
 model_name = "gemini-3.8-flash" if "Flash" in model_choice else "gemini-3.8-pro"
-
-# 旧漢字変換オプション
-convert_kanji = st.sidebar.checkbox("旧漢字を新漢字に変換する", value=True, help="佛→仏、經→経、體→体などの旧字体を現代の標準新字体に統一してWordに出力します。")
-
+convert_kanji = st.sidebar.checkbox("旧漢字を新漢字に変換する", value=True)
 batch_size = st.sidebar.slider("1回あたりの処理ページ数", 1, 5, 3)
 
 if "all_corrections" not in st.session_state: st.session_state.all_corrections = []
@@ -265,7 +278,7 @@ if pdf_file and txt_file:
 
             kanji_instruction = """
 4. **旧字体の新字体化（旧漢字→新漢字）**:
-   - 原本画像やテキストにある旧漢字（例: 佛→仏、經→経、體→体、爲→為、應→応、觀→観、釋→釈、晝→昼、辨/瓣/辯→弁 等）は、すべて現代の新字体（常用漢字・標準字体）へ変換してWordのテキストに出力してください。
+   - 原本画像やテキストにある旧漢字（例: 佛→仏、經→経、體→体、爲→為、應→応、觀→観、釋→釈、晝→昼 等）は、すべて現代の新字体（常用漢字・標準字体）へ変換してWordのテキストに出力してください。
    - 一般的な旧字新字変換はWord本文内で自然に適用し、Excel表にはOCR誤字・脱字や文脈上の疑義箇所を中心に記録してください。
 """ if convert_kanji else """
 4. **字体の維持**:
@@ -309,6 +322,13 @@ if pdf_file and txt_file:
                         if att == 2: st.warning(f"⚠️ {b_start}〜{b_end}頁でエラー: {e}")
                         else: time.sleep(5)
                 
+                # バッチ完了ごとにサーバー内部へ自動バックアップ保存
+                if st.session_state.all_corrections or st.session_state.all_pages:
+                    tmp_ex = create_excel_bytes(st.session_state.all_corrections, base_name)
+                    tmp_wd = create_word_bytes(st.session_state.all_pages, base_name)
+                    with open(BACKUP_EXCEL_PATH, "wb") as f: f.write(tmp_ex)
+                    with open(BACKUP_WORD_PATH, "wb") as f: f.write(tmp_wd)
+
                 done = b_end - start_p + 1
                 p_bar.progress(min(1.0, done / tot_target), f"進行状況: {done} / {tot_target} ページ完了")
             s_box.success(f"✅ {start_p}〜{st.session_state.last_done_page} ページの校正が完了！（検出: {len(st.session_state.all_corrections)} 件）")
